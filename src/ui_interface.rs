@@ -92,8 +92,16 @@ pub fn get_id() -> String {
 
 #[inline]
 pub fn goto_install() {
-    allow_err!(crate::run_me(vec!["--install"]));
-    std::process::exit(0);
+    // 不要立即退出進程，而是啟動安裝界面
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_path) = exe.to_str() {
+            // 啟動安裝界面，但不退出當前服務
+            let args = vec!["--install"];
+            if let Err(e) = crate::run_me(args) {
+                log::error!("Failed to start install UI: {}", e);
+            }
+        }
+    }
 }
 
 #[inline]
@@ -1389,7 +1397,8 @@ async fn check_id(
                                 return "Too frequent";
                             }
                             Ok(register_pk_response::Result::NOT_SUPPORT) => {
-                                return "server_not_support";
+                                // 跳過伺服器不支援檢查，強制允許修改 ID
+                                ok = true;
                             }
                             Ok(register_pk_response::Result::SERVER_ERROR) => {
                                 return "Server error";

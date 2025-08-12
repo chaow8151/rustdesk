@@ -895,6 +895,9 @@ pub fn main_get_sound_inputs() -> Vec<String> {
 pub fn main_get_login_device_info() -> SyncReturn<String> {
     SyncReturn(get_login_device_info_json())
 }
+pub fn main_get_sysinfo() -> SyncReturn<String> {
+    SyncReturn(crate::common::get_sysinfo().to_string())
+}
 
 pub fn main_change_id(new_id: String) {
     change_id(new_id)

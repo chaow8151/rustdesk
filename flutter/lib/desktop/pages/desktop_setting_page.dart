@@ -18,6 +18,7 @@ import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/plugin/manager.dart';
 import 'package:flutter_hbb/plugin/widgets/desktop_settings.dart';
+import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -453,23 +454,27 @@ class _GeneralState extends State<_General> {
   }
 
   Widget service() {
-    if (bind.isOutgoingOnly()) {
-      return const Offstage();
-    }
-
-    return _Card(title: 'Service', children: [
-      Obx(() => _Button(serviceStop.value ? 'Start' : 'Stop', () {
-            () async {
-              serviceBtnEnabled.value = false;
-              await start_service(serviceStop.value);
-              // enable the button after 1 second
-              Future.delayed(const Duration(seconds: 1), () {
-                serviceBtnEnabled.value = true;
-              });
-            }();
-          }, enabled: serviceBtnEnabled.value))
-    ]);
+  if (bind.isOutgoingOnly()) {
+    return const Offstage();
   }
+
+  // 檢查是否已安裝
+  if (bind.mainIsInstalled()) {
+    return const Offstage(); // 已安裝則隱藏整個服務卡片
+  }
+
+  return _Card(title: 'Service', children: [
+    _Button('Install', () async {
+      serviceBtnEnabled.value = false;
+      await rustDeskWinManager.closeAllSubWindows();
+      bind.mainGotoInstall();
+      // enable the button after 1 second
+      Future.delayed(const Duration(seconds: 1), () {
+        serviceBtnEnabled.value = true;
+      });
+    }, enabled: serviceBtnEnabled.value)
+  ]);
+}
 
   Widget other() {
     final showAutoUpdate =

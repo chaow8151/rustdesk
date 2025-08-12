@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
+import '../../common.dart';
+import '../../models/platform_model.dart';
 
 import 'package:auto_size_text/auto_size_text.dart';
 import 'package:flutter/material.dart';
@@ -49,11 +51,23 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   var watchIsCanRecordAudio = false;
   Timer? _updateTimer;
   bool isCardClosed = false;
+String? _cachedSysinfo;
+  Map<String, dynamic>? _parsedSysinfo;
 
   final RxBool _editHover = false.obs;
   final RxBool _block = false.obs;
 
   final GlobalKey _childKey = GlobalKey();
+final List<Map<String, String>> _hardwareFields = [
+    {'label': '主機名稱', 'key': 'hostname'},
+    {'label': '處  理  器', 'key': 'cpu'},
+    {'label': '主  機  板', 'key': 'motherboard'},
+    {'label': '記  憶  體', 'key': 'memory'},
+    {'label': '顯  示  卡', 'key': 'gpu'},
+    {'label': '作業系統', 'key': 'os'},
+    {'label': '內  網  IP', 'key': 'internal_ip'},
+    {'label': '外  網  IP', 'key': 'external_ip'},
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -92,6 +106,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       buildTip(context),
       if (!isOutgoingOnly) buildIDBoard(context),
       if (!isOutgoingOnly) buildPasswordBoard(context),
+if (!isOutgoingOnly) OnlineStatusWidget().marginOnly(bottom: 6, right: 6),
       FutureBuilder<Widget>(
         future: Future.value(
             Obx(() => buildHelpCards(stateGlobal.updateUrl.value))),
@@ -115,15 +130,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     if (isIncomingOnly) {
       children.addAll([
         Divider(),
-        OnlineStatusWidget(
-          onSvcStatusChanged: () {
-            if (isInHomePage()) {
-              Future.delayed(Duration(milliseconds: 300), () {
-                _updateWindowSize();
-              });
-            }
-          },
-        ).marginOnly(bottom: 6, right: 6)
+        // 移除代碼
       ]);
     }
     final textColor = Theme.of(context).textTheme.titleLarge?.color;
@@ -179,10 +186,337 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     );
   }
 
+  // 硬體相關
+Future<String> _getSystemInfo() async {
+    try {
+      // 延遲 1 秒後再執行硬體檢測，確保主視窗已完全顯示並獲得焦點
+      await Future.delayed(Duration(seconds: 1));
+      return bind.mainGetSysinfo();
+    } catch (e) {
+      return '{"error": "無法獲取系統資訊"}';
+    }
+  }
+
+  void _preloadSysinfo() async {
+    try {
+      // 使用延遲機制，避免啟動時卡頓
+      final sysinfo = await _getSystemInfo();
+      _cachedSysinfo = sysinfo;
+      _parsedSysinfo = jsonDecode(sysinfo);
+      if (mounted) {
+        setState(() {}); 
+      }
+    } catch (e) {
+      print('預載硬體資訊失敗: $e');
+    }
+  }
+
   buildRightPane(BuildContext context) {
     return Container(
       color: Theme.of(context).scaffoldBackgroundColor,
-      child: ConnectionPage(),
+      child: Column(
+        children: [
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SizedBox(
+                  width: 367,
+                  height: 125,
+                  child: Image.asset(
+                    'assets/logo2.png',
+                    fit: BoxFit.contain,
+                  ),
+                ),
+                SizedBox(height: 16),
+                _buildClickableTitle(context),
+                SizedBox(height: 16),
+                _parsedSysinfo != null 
+                    ? _buildSystemInfo(_parsedSysinfo!)
+                    : Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            CircularProgressIndicator(),
+                            SizedBox(height: 16),
+                            Text(
+                              "正在檢測硬體資訊...",
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: Colors.grey[600],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildClickableTitle(BuildContext context) {
+    return StatefulBuilder(
+      builder: (context, setState) {
+        bool isHovered = false;
+        bool isPressed = false;
+
+        return MouseRegion(
+          onEnter: (_) => setState(() => isHovered = true),
+          onExit: (_) => setState(() => isHovered = false),
+          child: GestureDetector(
+            onTapDown: (_) => setState(() => isPressed = true),
+            onTapUp: (_) => setState(() => isPressed = false),
+            onTapCancel: () => setState(() => isPressed = false),
+            onTap: () => _copySystemInfo(),
+            child: AnimatedContainer(
+              duration: Duration(milliseconds: 150),
+              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: isPressed 
+                    ? Colors.lightBlue.withOpacity(0.3)
+                    : isHovered 
+                        ? Colors.lightBlue.withOpacity(0.1)
+                        : Colors.transparent,
+                borderRadius: BorderRadius.circular(8),
+                border: isHovered 
+                    ? Border.all(color: Colors.lightBlue.withOpacity(0.3), width: 1)
+                    : null,
+              ),
+              child: Text(
+                "本機硬體資訊",
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: isHovered ? Colors.lightBlue.shade700 : Colors.lightBlue,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _copySystemInfo() {
+    try {
+      final sysinfo = _parsedSysinfo ?? {};
+      
+      // 按照顯示順序構建複製文本
+      final infoLines = <String>[];
+      infoLines.add('主機名稱: ${sysinfo["hostname"] ?? "未知"}');
+      infoLines.add('處 理 器: ${sysinfo["cpu"] ?? "未知"}');
+      infoLines.add('主 機 板: ${sysinfo["motherboard"] ?? "未知"}');
+      infoLines.add('記 憶 體: ${sysinfo["memory"] ?? "未知"}');
+      
+      // 添加記憶體詳細資訊 - 減少7格縮排（從17格改為10格）
+      final memoryDetails = sysinfo['memory_details'];
+      if (memoryDetails != null && memoryDetails.toString().isNotEmpty && memoryDetails != "記憶體詳細資訊未知") {
+        final detailLines = memoryDetails.toString().split('\n');
+        for (var line in detailLines) {
+          if (line.trim().isNotEmpty) {
+            infoLines.add('          ${line.trim()}'); // 改為10個空格
+          }
+        }
+      }
+      
+      // 硬碟型號處理 - 第2行之後往右移10格
+      final diskInfo = sysinfo["disk"];
+      if (diskInfo != null && diskInfo.toString().isNotEmpty) {
+        final diskLines = diskInfo.toString().split('\n').where((line) => line.trim().isNotEmpty).toList();
+        
+        if (diskLines.isNotEmpty) {
+          // 第一行不變
+          infoLines.add('硬碟型號: ${diskLines[0]}');
+          
+          // 第二行之後往右移10格
+          for (int i = 1; i < diskLines.length; i++) {
+            infoLines.add('          ${diskLines[i]}'); // 10個空格縮排
+          }
+        } else {
+          infoLines.add('硬碟型號: 未知');
+        }
+      } else {
+        infoLines.add('硬碟型號: 未知');
+      }
+      
+      infoLines.add('顯 示 卡: ${sysinfo["gpu"] ?? "未知"}');
+      infoLines.add('作業系統: ${sysinfo["os"] ?? "未知"}');
+      infoLines.add('內 網 IP: ${sysinfo["internal_ip"] ?? "未知"}');
+      infoLines.add('外 網 IP: ${sysinfo["external_ip"] ?? "未知"}');
+      infoLines.add('網卡 MAC: ${sysinfo["mac_address"] ?? "未知"}');
+      
+      final infoText = infoLines.join('\n');
+
+      Clipboard.setData(ClipboardData(text: infoText));
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('已將本機硬體資訊複制到剪貼簿'),
+          duration: Duration(milliseconds: 800),
+        ),
+      );
+    } catch (e) {
+      print('複製錯誤: $e'); // 添加調試信息
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('複制失敗: ${e.toString()}'),
+          duration: Duration(milliseconds: 1500),
+        ),
+      );
+    }
+  }
+
+  Widget _buildSystemInfo(Map<String, dynamic> sysinfo) {
+    return Column(
+      children: [
+        _buildInfoRow("主機名稱", sysinfo['hostname'] ?? '未知'),
+        _buildInfoRow("處  理  器", sysinfo['cpu'] ?? '未知'),
+        _buildInfoRow("主  機  板", sysinfo['motherboard'] ?? '未知'),
+        _buildMemoryInfo(sysinfo), // 使用新的記憶體顯示函數
+        _buildDiskInfo(sysinfo['disk'] ?? '未知'), // 硬碟資訊移到記憶體下方
+        _buildInfoRow("顯  示  卡", sysinfo['gpu'] ?? '未知'),
+        _buildInfoRow("作業系統", sysinfo['os'] ?? '未知'),
+        _buildInfoRow("內  網  IP", sysinfo['internal_ip'] ?? '未知'),
+        _buildInfoRow("外  網  IP", sysinfo['external_ip'] ?? '未知'),
+        _buildInfoRow("網卡MAC", sysinfo['mac_address'] ?? '未知'),
+      ],
+    );
+  }
+
+  // 新增記憶體詳細資訊顯示函數
+  Widget _buildMemoryInfo(Map<String, dynamic> sysinfo) {
+    final memoryBasic = sysinfo['memory'] ?? '未知';
+    final memoryDetails = sysinfo['memory_details'];
+    
+    List<Widget> memoryWidgets = [];
+    
+    // 基本記憶體資訊
+    memoryWidgets.add(_buildInfoRow("記  憶  體", memoryBasic));
+    
+    // 詳細記憶體資訊
+    if (memoryDetails != null && 
+        memoryDetails.toString().isNotEmpty && 
+        memoryDetails != "記憶體詳細資訊未知") {
+      final detailLines = memoryDetails.toString().split('\n');
+      for (var line in detailLines) {
+        if (line.trim().isNotEmpty) {
+          memoryWidgets.add(
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: 20),
+              child: Row(
+                children: [
+                  SizedBox(width: 80), // 與標籤對齊
+                  Expanded(
+                    child: SelectableText(
+                      line.trim(),
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey[600],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+      }
+    }
+    
+    return Column(children: memoryWidgets);
+  }
+
+  Widget _buildLoadingInfo() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          CircularProgressIndicator(),
+          SizedBox(height: 16),
+          Text(
+            "正在檢測硬體資訊...",
+            style: TextStyle(
+              fontSize: 14,
+              color: Colors.grey[600],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value) {
+    return Padding(
+      padding: EdgeInsets.symmetric(horizontal: 20),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 80,
+            child: Text(
+              "$label:",
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey[700],
+              ),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey[600],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDiskInfo(String diskInfo) {
+    final diskLines = diskInfo.split('\n').where((line) => line.trim().isNotEmpty).toList();
+    
+    if (diskLines.isEmpty) {
+      return _buildInfoRow("硬碟型號", "未知");
+    }
+    
+    return Column(
+      children: diskLines.asMap().entries.map((entry) {
+        final index = entry.key;
+        final disk = entry.value;
+        return Padding(
+          padding: EdgeInsets.symmetric(horizontal: 20),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 80,
+                child: Text(
+                  index == 0 ? "硬碟型號:" : "",
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey[700],
+                  ),
+                ),
+              ),
+              Expanded(
+                child: SelectableText(
+                  disk,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.grey[600],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
     );
   }
 
@@ -387,6 +721,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     );
   }
 
+// 硬體相關結束
+
   buildTip(BuildContext context) {
     final isOutgoingOnly = bind.isOutgoingOnly();
     return Padding(
@@ -455,7 +791,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       return buildInstallCard("", systemError, "", () {});
     }
 
-    if (isWindows && !bind.isDisableInstallation()) {
+    // 隱藏安裝選項
+if (false) {
       if (!bind.mainIsInstalled()) {
         return buildInstallCard(
             "", bind.isOutgoingOnly() ? "" : "install_tip", "Install",
@@ -692,6 +1029,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   @override
   void initState() {
     super.initState();
+_preloadSysinfo();
     _updateTimer = periodic_immediate(const Duration(seconds: 1), () async {
       await gFFI.serverModel.fetchID();
       final error = await bind.mainGetError();

@@ -5,6 +5,8 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     task::Poll,
 };
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 use serde_json::{json, Map, Value};
 
@@ -793,52 +795,464 @@ pub fn hostname() -> String {
     return DEVICE_NAME.lock().unwrap().clone();
 }
 
+// 硬體開始分析
 #[inline]
 pub fn get_sysinfo() -> serde_json::Value {
-    use hbb_common::sysinfo::System;
+    use hbb_common::sysinfo::{System, Disks};
+    
     let mut system = System::new();
-    system.refresh_memory();
-    system.refresh_cpu();
-    let memory = system.total_memory();
-    let memory = (memory as f64 / 1024. / 1024. / 1024. * 100.).round() / 100.;
-    let cpus = system.cpus();
-    let cpu_name = cpus.first().map(|x| x.brand()).unwrap_or_default();
-    let cpu_name = cpu_name.trim_end();
-    let cpu_freq = cpus.first().map(|x| x.frequency()).unwrap_or_default();
-    let cpu_freq = (cpu_freq as f64 / 1024. * 100.).round() / 100.;
-    let cpu = if cpu_freq > 0. {
-        format!("{}, {}GHz, ", cpu_name, cpu_freq)
+    system.refresh_all();
+    
+    // CPU 資訊
+    let cpu_info = if !system.cpus().is_empty() {
+        let cpu = &system.cpus()[0];
+        format!("{} ({} cores)", cpu.brand().trim(), system.cpus().len())
     } else {
-        "".to_owned() // android
+        "未知".to_string()
     };
-    let num_cpus = num_cpus::get();
-    let num_pcpus = num_cpus::get_physical();
-    let mut os = system.distribution_id();
-    os = format!("{} / {}", os, system.long_os_version().unwrap_or_default());
-    #[cfg(windows)]
-    {
-        os = format!("{os} - {}", system.os_version().unwrap_or_default());
-    }
-    let hostname = hostname(); // sys.hostname() return localhost on android in my test
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    let out;
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let mut out;
-    out = json!({
-        "cpu": format!("{cpu}{num_cpus}/{num_pcpus} cores"),
-        "memory": format!("{memory}GB"),
-        "os": os,
-        "hostname": hostname,
-    });
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        let username = crate::platform::get_active_username();
-        if !username.is_empty() && (!cfg!(windows) || username != "SYSTEM") {
-            out["username"] = json!(username);
+    
+    // 記憶體資訊
+    let total_memory = system.total_memory();
+    let used_memory = system.used_memory();
+    let total_gb = (total_memory as f64 / 1024. / 1024. / 1024. * 100.).round() / 100.;
+    let used_gb = (used_memory as f64 / 1024. / 1024. / 1024. * 100.).round() / 100.;
+    let memory_info = format!("{:.1}GB / {:.1}GB", used_gb, total_gb);
+    
+    // 獲取詳細記憶體資訊
+    let memory_details = get_memory_details();
+
+    // 內網IP資訊
+    let internal_ip_info = get_internal_ip_info();
+
+    // 外網IP資訊
+    let external_ip_info = get_external_ip_info();
+ // 硬碟型號資訊（獲取實際硬碟型號）    
+#[cfg(target_os = "windows")]
+let disk_info = {
+    const SCRIPT: &str = r###"
+$ErrorActionPreference = 'SilentlyContinue'
+$disks = Get-CimInstance -ClassName Win32_DiskDrive | ForEach-Object {
+    $disk = $_
+    $partitions = Get-CimAssociatedInstance -InputObject $disk -ResultClassName Win32_DiskPartition
+    $logicalDisks = $partitions | ForEach-Object {
+        Get-CimAssociatedInstance -InputObject $_ -ResultClassName Win32_LogicalDisk
+    } | Where-Object { $_.DriveType -eq 3 }
+
+    if ($logicalDisks) {
+        $driveInfo = $logicalDisks | ForEach-Object {
+            $capacityGB = [math]::Round($_.Size / 1GB, 1)
+            "$($_.DeviceID)$($capacityGB)GB"
+        }
+        [PSCustomObject]@{ 
+            Model    = $disk.Model
+            Drives   = $driveInfo -join ', '
+            SortKey  = ($logicalDisks | Sort-Object DeviceID | Select-Object -First 1).DeviceID
+        }
+    } else {
+        [PSCustomObject]@{ 
+            Model    = $disk.Model
+            Drives   = $null
+            SortKey  = "zzz" + $disk.Index
         }
     }
-    out
 }
+
+if ($disks) {
+    ($disks | Sort-Object SortKey | ForEach-Object { 
+        if ($_.Drives) {
+            "$($_.Model) $($_.Drives)"
+        } else {
+            $_.Model
+        }
+    }) -join "`n"
+} else {
+    '未知'
+}
+"###;
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", SCRIPT])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output();
+
+    match output {
+        Ok(result) => {
+            let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+            if !stdout.is_empty() && stdout != "未知" {
+                stdout
+            } else {
+                "未知".to_string()
+            }
+        }
+        Err(_) => "未知".to_string(),
+    }
+};
+
+    
+    // 顯示卡資訊（改進獲取方式）
+    let gpu_info = get_gpu_info_improved();
+    
+    // 主機板資訊
+    let motherboard_info = get_motherboard_info();
+    
+    // 作業系統資訊
+    let mut os_info = format!("{} / {}" ,
+                         system.name().unwrap_or_else(|| "未知".to_string()),
+                         system.long_os_version().unwrap_or_default());
+    #[cfg(windows)]
+    {
+        os_info = format!("{} - {}", os_info, system.os_version().unwrap_or_default());
+    }
+    
+    // 主機名稱
+    let hostname_info = hostname().to_uppercase();
+    
+    json!({
+        "hostname": hostname_info,
+        "cpu": cpu_info,
+        "motherboard": motherboard_info,
+        "memory": memory_info,
+        "memory_details": memory_details,
+        "disk": disk_info,
+        "gpu": gpu_info,
+        "os": os_info,
+        "internal_ip": internal_ip_info,
+        "external_ip": external_ip_info,
+        "mac_address": get_mac_address(),
+    })
+}
+
+// 內網IP資訊獲取函數 - 修改為優先選擇真正連網的網卡
+fn get_internal_ip_info() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        const SCRIPT: &str = r###"
+        $ErrorActionPreference = 'SilentlyContinue'
+        
+        # 獲取有預設路由的網卡（真正連網的網卡）
+        $defaultRoute = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '::' -and $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1
+        
+        if ($defaultRoute) {
+            $interfaceIndex = $defaultRoute.InterfaceIndex
+            $gateway = $defaultRoute.NextHop
+            
+            # 根據介面索引獲取IP和子網路遮罩
+            $ipConfig = Get-NetIPAddress -InterfaceIndex $interfaceIndex -AddressFamily IPv4 -AddressState Preferred | Select-Object -First 1
+            
+            if ($ipConfig) {
+                $ip = $ipConfig.IPAddress
+                $prefixLength = $ipConfig.PrefixLength
+                
+                # 將 CIDR 格式轉換為點分十進制格式
+                $maskBits = [UInt32]([Math]::Pow(2, 32) - [Math]::Pow(2, (32 - $prefixLength)))
+                $mask = "{0}.{1}.{2}.{3}" -f (($maskBits -shr 24) -band 0xFF), (($maskBits -shr 16) -band 0xFF), (($maskBits -shr 8) -band 0xFF), ($maskBits -band 0xFF)
+                
+                Write-Output "$ip, $mask, $gateway"
+            } else {
+                Write-Output "未知, 未知, 未知"
+            }
+        } else {
+            Write-Output "未知, 未知, 未知"
+        }
+        "###;
+        
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", SCRIPT])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output();
+
+        match output {
+            Ok(result) => {
+                let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+                if !stdout.is_empty() && stdout != "未知, 未知, 未知" {
+                    stdout
+                } else {
+                    "未知, 未知, 未知".to_string()
+                }
+            }
+            Err(_) => "未知, 未知, 未知".to_string(),
+        }
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        "未知".to_string()
+    }
+}
+
+// 執行 PowerShell 命令並返回處理過的字串
+#[cfg(target_os = "windows")]
+fn run_powershell_command(command: &str) -> String {
+    if let Ok(output) = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", command])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output()
+    {
+        if output.status.success() {
+            let result = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !result.is_empty() {
+                return result;
+            }
+        }
+    }
+    "未知".to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_powershell_command(_command: &str) -> String {
+    "未知".to_string()
+}
+
+// 外網IP資訊獲取函數
+fn get_external_ip_info() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-WindowStyle", "Hidden",
+                "-Command",
+                "try { (Invoke-RestMethod -Uri 'https://api.ipify.org' -UseBasicParsing).Trim() } catch { '' }"
+            ])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output()
+        {
+            if output.status.success() {
+                let ip_info = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !ip_info.is_empty() {
+                    return ip_info;
+                }
+            }
+        }
+    }
+    "未知".to_string()
+}
+
+// 獲取 MAC 地址的函數 - 修改為獲取真正連網網卡的MAC
+fn get_mac_address() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        const SCRIPT: &str = r###"
+        $ErrorActionPreference = 'SilentlyContinue'
+        
+        # 獲取有預設路由的網卡（真正連網的網卡）
+        $defaultRoute = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '::' -and $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1
+        
+        if ($defaultRoute) {
+            $interfaceIndex = $defaultRoute.InterfaceIndex
+            
+            # 根據介面索引獲取網卡資訊
+            $adapter = Get-NetAdapter -InterfaceIndex $interfaceIndex | Select-Object -First 1
+            
+            if ($adapter -and $adapter.MacAddress) {
+                # 過濾掉虛擬網卡
+                $description = $adapter.InterfaceDescription.ToLower()
+                $isVirtual = $description -like "*virtual*" -or 
+                           $description -like "*vmware*" -or 
+                           $description -like "*virtualbox*" -or 
+                           $description -like "*hyper-v*" -or 
+                           $description -like "*tap*" -or 
+                           $description -like "*tun*" -or 
+                           $description -like "*loopback*" -or
+                           $description -like "*teredo*" -or
+                           $description -like "*isatap*"
+                
+                if (-not $isVirtual) {
+                    Write-Output $adapter.MacAddress
+                } else {
+                    # 如果預設路由的網卡是虛擬網卡，嘗試找實體網卡
+                    $physicalAdapter = Get-NetAdapter | Where-Object { 
+                        $_.Status -eq 'Up' -and 
+                        $_.InterfaceDescription -notlike '*Virtual*' -and
+                        $_.InterfaceDescription -notlike '*VMware*' -and
+                        $_.InterfaceDescription -notlike '*VirtualBox*' -and
+                        $_.InterfaceDescription -notlike '*Hyper-V*' -and
+                        $_.InterfaceDescription -notlike '*TAP*' -and
+                        $_.InterfaceDescription -notlike '*TUN*' -and
+                        $_.InterfaceDescription -notlike '*Loopback*' -and
+                        $_.InterfaceDescription -notlike '*Teredo*' -and
+                        $_.InterfaceDescription -notlike '*ISATAP*'
+                    } | Sort-Object InterfaceMetric | Select-Object -First 1
+                    
+                    if ($physicalAdapter) {
+                        Write-Output $physicalAdapter.MacAddress
+                    } else {
+                        Write-Output "未知"
+                    }
+                }
+            } else {
+                Write-Output "未知"
+            }
+        } else {
+            Write-Output "未知"
+        }
+        "###;
+        
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", SCRIPT])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output();
+
+        match output {
+            Ok(result) => {
+                let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+                if !stdout.is_empty() && stdout != "未知" {
+                    stdout
+                } else {
+                    "未知".to_string()
+                }
+            }
+            Err(_) => "未知".to_string(),
+        }
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        "未知".to_string()
+    }
+}
+
+// 簡化的顯卡資訊獲取函數（僅支援 Windows）
+fn get_gpu_info_improved() -> String {
+    run_powershell_command("Get-CimInstance -ClassName Win32_VideoController | Select-Object -ExpandProperty Name")
+}
+
+// 主機板資訊獲取函數（僅支援 Windows）
+fn get_motherboard_info() -> String {
+    let motherboard = run_powershell_command("Get-WmiObject -Class Win32_BaseBoard | Select-Object -ExpandProperty Product");
+    let memory_slot_info = get_memory_slot_info();
+    
+    if motherboard != "未知" && memory_slot_info != "未知" {
+        format!("{} ({})", motherboard, memory_slot_info)
+    } else {
+        motherboard
+    }
+}
+
+// 新增獲取記憶體槽位資訊的函數
+fn get_memory_slot_info() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        const SCRIPT: &str = r###"
+        $ErrorActionPreference = 'SilentlyContinue'
+        
+        # 獲取總槽位數
+        $totalSlots = (Get-CimInstance -ClassName Win32_PhysicalMemoryArray | Measure-Object -Property MemoryDevices -Sum).Sum
+        
+        # 獲取已使用槽位數
+        $usedSlots = (Get-CimInstance -ClassName Win32_PhysicalMemory | Measure-Object).Count
+        
+        if ($totalSlots -and $usedSlots) {
+            "{0}/{1} DIMM" -f $usedSlots, $totalSlots
+        } else {
+            "Unknown"
+        }
+        "###;
+        
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", SCRIPT])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output();
+
+        match output {
+            Ok(result) => {
+                let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+                if !stdout.is_empty() && stdout != "Unknown" {
+                    stdout
+                } else {
+                    "未知".to_string()
+                }
+            }
+            Err(_) => "未知".to_string(),
+        }
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        "未知".to_string()
+    }
+}
+
+// 獲取詳細記憶體資訊的函數
+fn get_memory_details() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        const SCRIPT: &str = r###"
+        $ErrorActionPreference = 'SilentlyContinue'
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        $memoryModules = Get-CimInstance -ClassName Win32_PhysicalMemory | ForEach-Object {
+            $capacity = [math]::Round($_.Capacity / 1GB)
+            $speed = if ($_.Speed) { $_.Speed } else { "Unknown" }
+            $generation = "DDR"
+            
+            # 嘗試確定記憶體代數
+            if ($_.SMBIOSMemoryType -eq 26) { $generation = "DDR4" }
+            elseif ($_.SMBIOSMemoryType -eq 24) { $generation = "DDR3" }
+            elseif ($_.SMBIOSMemoryType -eq 22) { $generation = "DDR2" }
+            elseif ($_.SMBIOSMemoryType -eq 21) { $generation = "DDR" }
+            elseif ($_.SMBIOSMemoryType -eq 20) { $generation = "SDRAM" }
+            else { $generation = "DDR_Unknown" }
+            
+            # 獲取型號
+            $model = if ($_.PartNumber -and $_.PartNumber.Trim() -ne "") { 
+                $_.PartNumber.Trim() 
+            } else { 
+                "Brand_Unknown" 
+            }
+            
+            # 返回格式化的字串，使用英文避免編碼問題
+            "{0}GB {1} Speed{2}MHz {3}" -f $capacity, $generation, $speed, $model
+        }
+        
+        if ($memoryModules) {
+            $memoryModules -join "`n"
+        } else {
+            "Memory_Details_Unknown"
+        }
+        "###;
+        
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-OutputFormat", "Text", "-Command", SCRIPT])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output();
+
+        match output {
+            Ok(result) => {
+                // 嘗試使用 UTF-8 解碼
+                let stdout = if let Ok(utf8_str) = String::from_utf8(result.stdout.clone()) {
+                    utf8_str
+                } else {
+                    // 如果 UTF-8 失敗，使用 lossy 轉換
+                    String::from_utf8_lossy(&result.stdout).to_string()
+                };
+                
+                let cleaned = stdout.trim().to_string();
+                if !cleaned.is_empty() && cleaned != "Memory_Details_Unknown" {
+                    // 將英文標識符轉換為中文 - 注意順序，先處理複合詞再處理單詞
+                    cleaned
+                        .replace("Brand_Unknown", "廠牌未知")
+                        .replace("DDR_Unknown", "DDR代數未知")
+                        .replace("Memory_Details_Unknown", "記憶體詳細資訊未知")
+                        .replace("Speed", "")
+                        .replace("Unknown", "未知")
+                } else {
+                    "記憶體詳細資訊未知".to_string()
+                }
+            }
+            Err(_) => "記憶體詳細資訊未知".to_string(),
+        }
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        "記憶體詳細資訊未知".to_string()
+    }
+}
+// 硬體分析結束
 
 #[inline]
 pub fn check_port<T: std::string::ToString>(host: T, port: i32) -> String {
@@ -1028,7 +1442,7 @@ pub fn get_ipv6_punch_enabled() -> bool {
 
 pub fn get_local_option(key: &str) -> String {
     let v = LocalConfig::get_option(key);
-    if key == keys::OPTION_ENABLE_UDP_PUNCH || key == keys::OPTION_ENABLE_IPV6_PUNCH {
+    if key == keys::OPTION_ENABLE_IPV6_PUNCH {
         if v.is_empty() {
             if !is_public(&Config::get_rendezvous_server()) {
                 return "N".to_owned();

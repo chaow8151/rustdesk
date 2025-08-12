@@ -159,9 +159,13 @@ void runMainApp(bool startService) async {
     if (handledByUniLinks || handleUriLink(cmdArgs: kBootArgs)) {
       windowManager.hide();
     } else {
-      windowManager.show();
-      windowManager.focus();
-      // Move registration of active main window here to prevent from async visible check.
+      // 確保視窗顯示在最上層
+      await windowManager.show();
+      await windowManager.focus();
+      // 強制置頂一次
+      await windowManager.setAlwaysOnTop(true);
+      await Future.delayed(Duration(milliseconds: 100));
+      await windowManager.setAlwaysOnTop(false);
       rustDeskWinManager.registerActiveWindow(kWindowMainId);
     }
     windowManager.setOpacity(1);
